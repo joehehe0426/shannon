@@ -143,6 +143,7 @@ Shannon Pro supports a self-hosted runner model (similar to GitHub Actions self-
 ### Prerequisites
 
 - **Docker** - Container runtime ([Install Docker](https://docs.docker.com/get-docker/))
+- **Node.js + npm** - Required to install/build Shannon locally (`npm install`)
 - **AI Provider Credentials** (choose one):
   - **Anthropic API key** (recommended) - Get from [Anthropic Console](https://console.anthropic.com)
   - **Claude Code OAuth token**
@@ -157,7 +158,10 @@ Shannon Pro supports a self-hosted runner model (similar to GitHub Actions self-
 git clone https://github.com/KeygraphHQ/shannon.git
 cd shannon
 
-# 2. Configure credentials (choose one method)
+# 2. Install dependencies
+npm install
+
+# 3. Configure credentials (choose one method)
 
 # Option A: Export environment variables
 export ANTHROPIC_API_KEY="your-api-key"              # or CLAUDE_CODE_OAUTH_TOKEN
@@ -169,7 +173,7 @@ ANTHROPIC_API_KEY=your-api-key
 CLAUDE_CODE_MAX_OUTPUT_TOKENS=64000
 EOF
 
-# 3. Run a pentest
+# 4. Run a pentest
 ./shannon start URL=https://your-app.com REPO=your-repo
 ```
 
@@ -320,6 +324,24 @@ You may need to run commands with `sudo` depending on your Docker setup. If you 
 **For macOS:**
 
 Works out of the box with Docker Desktop installed.
+
+**For Termux (Android):**
+
+Shannon can be installed in Termux, but runtime orchestration still requires Docker/Podman Compose services. Most users run against a remote Docker host.
+
+```bash
+# Install and build in Termux
+npm run install:termux
+
+# Optional: point Docker CLI to a remote host
+export DOCKER_HOST=tcp://<docker-host>:2375
+```
+
+If `./shannon` cannot find compose commands, install one of:
+- `docker compose`
+- `docker-compose`
+- `podman compose`
+- `podman-compose`
 
 **Testing Local Applications:**
 
