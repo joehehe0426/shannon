@@ -8,17 +8,82 @@ case "$OSTYPE" in
   msys*) export MSYS_NO_PATHCONV=1 ;;
 esac
 
-# Detect Podman vs Docker and set compose files accordingly
-# Podman doesn't support host-gateway, so we only include the Docker override for actual Docker
+# Detect available container runtime and compose command.
+# Podman doesn't support host-gateway, so only Docker gets the override file.
 COMPOSE_BASE="docker-compose.yml"
-if command -v podman &>/dev/null; then
-  # Podman detected (either native or via Docker Desktop shim) - use base config only
-  COMPOSE_OVERRIDE=""
-else
-  # Docker detected - include extra_hosts override for Linux localhost access
-  COMPOSE_OVERRIDE="-f docker-compose.docker.yml"
-fi
 COMPOSE_FILE="$COMPOSE_BASE"
+CONTAINER_RUNTIME=""
+COMPOSE_CMD_RESOLVED=0
+declare -a COMPOSE_CMD=()
+declare -a COMPOSE_OVERRIDE_ARGS=()
+
+if command -v docker >/dev/null 2>&1; then
+  CONTAINER_RUNTIME="docker"
+elif command -v podman >/dev/null 2>&1; then
+  CONTAINER_RUNTIME="podman"
+fi
+
+if [ "$CONTAINER_RUNTIME" = "podman" ]; then
+  COMPOSE_OVERRIDE_ARGS=()
+else
+  COMPOSE_OVERRIDE_ARGS=(-f "docker-compose.docker.yml")
+fi
+
+is_termux() {
+  [ -n "${TERMUX_VERSION:-}" ] || [ "${PREFIX:-}" = "/data/data/com.termux/files/usr" ]
+}
+
+show_runtime_error() {
+  if is_termux; then
+    cat << 'EOF'
+ERROR: Container runtime not detected.
+
+Shannon requires Docker or Podman compose services.
+In Termux, the common setup is a remote Docker host:
+  export DOCKER_HOST=tcp://<docker-host>:2375
+
+Then ensure one of these commands is available:
+  docker compose
+  docker-compose
+  podman compose
+  podman-compose
+EOF
+  else
+    echo "ERROR: Docker/Podman compose is required but was not found."
+  fi
+}
+
+resolve_compose_command() {
+  if [ "$COMPOSE_CMD_RESOLVED" -eq 1 ]; then
+    return 0
+  fi
+
+  if [ -n "$CONTAINER_RUNTIME" ] && "$CONTAINER_RUNTIME" compose version >/dev/null 2>&1; then
+    COMPOSE_CMD=("$CONTAINER_RUNTIME" "compose")
+    COMPOSE_CMD_RESOLVED=1
+    return 0
+  fi
+
+  if command -v docker-compose >/dev/null 2>&1; then
+    COMPOSE_CMD=("docker-compose")
+    COMPOSE_CMD_RESOLVED=1
+    return 0
+  fi
+
+  if command -v podman-compose >/dev/null 2>&1; then
+    COMPOSE_CMD=("podman-compose")
+    COMPOSE_CMD_RESOLVED=1
+    return 0
+  fi
+
+  show_runtime_error
+  return 1
+}
+
+compose() {
+  resolve_compose_command || return 1
+  "${COMPOSE_CMD[@]}" "$@"
+}
 
 # Load .env if present
 if [ -f .env ]; then
@@ -90,7 +155,7 @@ parse_args() {
 
 # Check if Temporal is running and healthy
 is_temporal_ready() {
-  docker compose -f "$COMPOSE_FILE" $COMPOSE_OVERRIDE exec -T temporal \
+  compose -f "$COMPOSE_FILE" "${COMPOSE_OVERRIDE_ARGS[@]}" exec -T temporal \
     temporal operator cluster health --address localhost:7233 2>/dev/null | grep -q "SERVING"
 }
 
@@ -100,7 +165,7 @@ ensure_containers() {
   # Docker compose will only recreate if the mount actually changed
   if [ -n "$OUTPUT_DIR" ]; then
     echo "Ensuring worker has correct output mount..."
-    docker compose -f "$COMPOSE_FILE" $COMPOSE_OVERRIDE up -d worker 2>/dev/null || true
+    compose -f "$COMPOSE_FILE" "${COMPOSE_OVERRIDE_ARGS[@]}" up -d worker 2>/dev/null || true
   fi
 
   # Quick check: if Temporal is already healthy, we're good
@@ -113,9 +178,9 @@ ensure_containers() {
   if [ "$REBUILD" = "true" ]; then
     # Force rebuild without cache (use when code changes aren't being picked up)
     echo "Rebuilding with --no-cache..."
-    docker compose -f "$COMPOSE_FILE" $COMPOSE_OVERRIDE build --no-cache worker
+    compose -f "$COMPOSE_FILE" "${COMPOSE_OVERRIDE_ARGS[@]}" build --no-cache worker
   fi
-  docker compose -f "$COMPOSE_FILE" $COMPOSE_OVERRIDE up -d --build
+  compose -f "$COMPOSE_FILE" "${COMPOSE_OVERRIDE_ARGS[@]}" up -d --build
 
   # Wait for Temporal to be ready
   echo "Waiting for Temporal to be ready..."
@@ -222,7 +287,7 @@ cmd_start() {
   # Handle ROUTER flag - start claude-code-router for multi-model support
   if [ "$ROUTER" = "true" ]; then
     # Check if router is already running
-    if docker compose -f "$COMPOSE_FILE" $COMPOSE_OVERRIDE --profile router ps router 2>/dev/null | grep -q "running"; then
+    if compose -f "$COMPOSE_FILE" "${COMPOSE_OVERRIDE_ARGS[@]}" --profile router ps router 2>/dev/null | grep -q "running"; then
       echo "Router already running, skipping startup..."
     else
       echo "Starting claude-code-router..."
@@ -233,7 +298,7 @@ cmd_start() {
       fi
 
       # Start router with profile
-      docker compose -f "$COMPOSE_FILE" $COMPOSE_OVERRIDE --profile router up -d router
+      compose -f "$COMPOSE_FILE" "${COMPOSE_OVERRIDE_ARGS[@]}" --profile router up -d router
 
       # Give router a few seconds to start (health check disabled for now - TODO: debug later)
       echo "Waiting for router to start..."
@@ -273,7 +338,7 @@ cmd_start() {
   [ -n "$WORKSPACE" ] && ARGS="$ARGS --workspace $WORKSPACE"
 
   # Run the client to submit workflow
-  docker compose -f "$COMPOSE_FILE" $COMPOSE_OVERRIDE exec -T worker \
+  compose -f "$COMPOSE_FILE" "${COMPOSE_OVERRIDE_ARGS[@]}" exec -T worker \
     node dist/temporal/client.js "$URL" "$CONTAINER_REPO" $ARGS
 }
 
@@ -337,7 +402,7 @@ cmd_workspaces() {
   # Ensure containers are running (need worker to execute node)
   ensure_containers
 
-  docker compose -f "$COMPOSE_FILE" $COMPOSE_OVERRIDE exec -T worker \
+  compose -f "$COMPOSE_FILE" "${COMPOSE_OVERRIDE_ARGS[@]}" exec -T worker \
     node dist/temporal/workspaces.js
 }
 
@@ -345,9 +410,9 @@ cmd_stop() {
   parse_args "$@"
 
   if [ "$CLEAN" = "true" ]; then
-    docker compose -f "$COMPOSE_FILE" $COMPOSE_OVERRIDE --profile router down -v
+    compose -f "$COMPOSE_FILE" "${COMPOSE_OVERRIDE_ARGS[@]}" --profile router down -v
   else
-    docker compose -f "$COMPOSE_FILE" $COMPOSE_OVERRIDE --profile router down
+    compose -f "$COMPOSE_FILE" "${COMPOSE_OVERRIDE_ARGS[@]}" --profile router down
   fi
 }
 
